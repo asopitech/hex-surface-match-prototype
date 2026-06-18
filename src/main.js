@@ -35,6 +35,7 @@ app.innerHTML = `
           <button class="proto" data-proto="paint">Paint</button>
           <button class="proto" data-proto="path">Path</button>
           <button class="proto" data-proto="arrow">Arrow</button>
+          <button class="proto" data-proto="screw">Screw</button>
           <button class="proto" data-proto="sweeper">Sweeper</button>
         </div>
         <div class="rule-card" id="proto-card"></div>
@@ -1029,6 +1030,11 @@ function resetAlt(countMove = false) {
     alt.arrowMotion = null;
     rebuildArrowOccupancy();
   }
+  if (proto === 'screw') {
+    alt.screwBoards = createScrewBoards();
+    alt.removedScrews = new Set();
+    alt.fallingBoards = new Set();
+  }
   if (proto === 'sweeper') {
     const mineCount = 12;
     const all = cells().map(c => c.id);
@@ -1053,6 +1059,7 @@ function updateProtoCard() {
     paint: ['Paint', '隣接セルが同色にならないように塗り分けます。'],
     path: ['One Stroke', '隣接セルを一筆書きで辿り、できるだけ全セルを訪れます。'],
     arrow: ['Arrow Clear', '長い矢印ピースを外へ逃がします。途中で別ピースに当たると抜けられません。'],
+    screw: ['Screw Out', '重なった板の見えているネジを外します。板のネジが全部なくなると落ちます。'],
     sweeper: ['Sweeper', '6近傍の地雷数を読むヘックス版マインスイーパーです。Shiftクリックで旗。'],
   }[proto];
   protoCardEl.innerHTML = `<strong>${text[0]}</strong><span>${text[1]}</span>`;
@@ -1064,6 +1071,7 @@ function altMetric() {
   if (proto === 'paint') return paintConflicts().size;
   if (proto === 'path') return `${alt.path?.length ?? 0}/${rows * cols}`;
   if (proto === 'arrow') return alt.arrowPieces?.filter(piece => !piece.cleared).length ?? 0;
+  if (proto === 'screw') return alt.screwBoards?.filter(board => !board.cleared).length ?? 0;
   if (proto === 'sweeper') return alt.revealed?.size ?? 0;
   return 0;
 }
@@ -1077,6 +1085,7 @@ function drawAltTexture() {
   if (proto === 'paint') drawPaint();
   if (proto === 'path') drawPath();
   if (proto === 'arrow') drawArrow();
+  if (proto === 'screw') drawScrew();
   if (proto === 'sweeper') drawSweeper();
   boardTexture.needsUpdate = true;
 }
@@ -1428,6 +1437,134 @@ function drawArrowHead(x, y, dir, piece, canMove) {
   tx.restore();
 }
 
+function createScrewBoards() {
+  return [
+    { id: 'base-a', value: 1, layer: 0, cells: axialCells([[1, 1], [2, 1], [3, 1], [4, 1]]), screws: axialCells([[1, 1], [4, 1]]) },
+    { id: 'base-b', value: 3, layer: 0, cells: axialCells([[5, 2], [5, 3], [5, 4], [5, 5]]), screws: axialCells([[5, 2], [5, 5]]) },
+    { id: 'base-c', value: 5, layer: 0, cells: axialCells([[2, 6], [3, 6], [4, 6], [5, 6], [6, 6]]), screws: axialCells([[2, 6], [6, 6]]) },
+    { id: 'mid-a', value: 0, layer: 1, cells: axialCells([[0, 3], [1, 3], [2, 3], [3, 3], [4, 3]]), screws: axialCells([[0, 3], [2, 3], [4, 3]]) },
+    { id: 'mid-b', value: 6, layer: 1, cells: axialCells([[7, 1], [6, 2], [5, 3], [4, 4]]), screws: axialCells([[7, 1], [4, 4]]) },
+    { id: 'mid-c', value: 8, layer: 1, cells: axialCells([[1, 5], [2, 4], [3, 3], [4, 2]]), screws: axialCells([[1, 5], [4, 2]]) },
+    { id: 'top-a', value: 2, layer: 2, cells: axialCells([[2, 2], [3, 2], [4, 2], [5, 2], [6, 2]]), screws: axialCells([[2, 2], [6, 2]]) },
+    { id: 'top-b', value: 4, layer: 2, cells: axialCells([[3, 5], [4, 4], [5, 3], [6, 2], [7, 1]]), screws: axialCells([[3, 5], [5, 3], [7, 1]]) },
+    { id: 'top-c', value: 7, layer: 3, cells: axialCells([[6, 4], [5, 4], [4, 4], [3, 4], [2, 4]]), screws: axialCells([[6, 4], [2, 4]]) },
+  ];
+}
+
+function screwKey(board, screw) {
+  return `${board.id}:${keyOf(screw.q, screw.r)}`;
+}
+
+function boardHasScrew(board, q, r) {
+  return board.screws.some(screw => screw.q === q && screw.r === r);
+}
+
+function boardContainsCell(board, q, r) {
+  return board.cells.some(cell => Math.round(cell.q) === q && Math.round(cell.r) === r);
+}
+
+function screwRemoved(board, screw) {
+  return alt.removedScrews?.has(screwKey(board, screw));
+}
+
+function activeScrews(board) {
+  return board.screws.filter(screw => !screwRemoved(board, screw));
+}
+
+function visibleScrewAt(q, r) {
+  const boards = [...(alt.screwBoards ?? [])]
+    .filter(board => !board.cleared && boardHasScrew(board, q, r) && !screwRemoved(board, { q, r }))
+    .sort((a, b) => b.layer - a.layer);
+  for (const board of boards) {
+    if (screwIsVisible(board, q, r)) return board;
+  }
+  return null;
+}
+
+function screwIsVisible(board, q, r) {
+  return !(alt.screwBoards ?? []).some(other => {
+    if (other.id === board.id || other.cleared || other.layer <= board.layer) return false;
+    return boardContainsCell(other, q, r);
+  });
+}
+
+function drawScrew() {
+  for (const c of cells()) {
+    const p = axialToPixel(c.q, c.r);
+    drawEmptyHex(c.q, c.r, p.x, p.y);
+  }
+
+  const boards = [...(alt.screwBoards ?? [])].sort((a, b) => a.layer - b.layer);
+  for (const board of boards) {
+    if (board.cleared && !alt.fallingBoards?.has(board.id)) continue;
+    drawScrewBoard(board, alt.fallingBoards?.has(board.id));
+  }
+  drawVisibleScrews();
+}
+
+function drawScrewBoard(board, falling = false) {
+  const piece = pieces[board.value % colorCount];
+  const fallOffset = falling ? 18 : 0;
+  const points = board.cells.map(cell => axialToPixel(cell.q, cell.r + fallOffset / 80));
+  tx.save();
+  tx.globalAlpha = falling ? 0.28 : 0.9;
+  tx.lineCap = 'round';
+  tx.lineJoin = 'round';
+  tx.beginPath();
+  points.forEach((point, index) => {
+    if (index === 0) tx.moveTo(point.x, point.y);
+    else tx.lineTo(point.x, point.y);
+  });
+  tx.strokeStyle = 'rgba(17,20,20,0.62)';
+  tx.lineWidth = 54;
+  tx.stroke();
+  tx.strokeStyle = piece.color;
+  tx.lineWidth = 44;
+  tx.stroke();
+  tx.strokeStyle = 'rgba(255,255,255,0.45)';
+  tx.lineWidth = 13;
+  tx.stroke();
+  tx.restore();
+}
+
+function drawVisibleScrews() {
+  for (const board of [...(alt.screwBoards ?? [])].sort((a, b) => a.layer - b.layer)) {
+    if (board.cleared) continue;
+    for (const screw of board.screws) {
+      if (screwRemoved(board, screw) || !screwIsVisible(board, screw.q, screw.r)) continue;
+      const p = axialToPixel(screw.q, screw.r);
+      drawScrewHead(p.x, p.y, board, hover?.q === screw.q && hover?.r === screw.r);
+    }
+  }
+}
+
+function drawScrewHead(x, y, board, hovered) {
+  const piece = pieces[board.value % colorCount];
+  tx.save();
+  tx.translate(x, y);
+  tx.shadowColor = 'rgba(0,0,0,0.24)';
+  tx.shadowBlur = 8;
+  tx.shadowOffsetY = 5;
+  tx.beginPath();
+  tx.arc(0, 0, hovered ? 20 : 17, 0, Math.PI * 2);
+  tx.fillStyle = hovered ? '#fffdf4' : '#d8d5cd';
+  tx.fill();
+  tx.shadowBlur = 0;
+  tx.lineWidth = hovered ? 5 : 3;
+  tx.strokeStyle = hovered ? '#f3b24e' : 'rgba(17,20,20,0.62)';
+  tx.stroke();
+  tx.strokeStyle = piece.ink;
+  tx.lineWidth = 5;
+  tx.lineCap = 'round';
+  tx.beginPath();
+  tx.moveTo(-8, 0);
+  tx.lineTo(8, 0);
+  tx.moveTo(0, -8);
+  tx.lineTo(0, 8);
+  tx.stroke();
+  tx.restore();
+}
+
 function drawSweeper() {
   const allRevealed = alt.dead;
   for (const c of cells()) {
@@ -1475,6 +1612,31 @@ async function launchArrowPiece(piece) {
   rebuildArrowOccupancy();
   const remaining = altMetric();
   toastEl.textContent = remaining === 0 ? '全ての長い矢印が抜けました' : `滑走。残り ${remaining} ピース`;
+  updateStats();
+  drawTexture();
+}
+
+async function removeScrew(board, q, r) {
+  const screw = board.screws.find(item => item.q === q && item.r === r);
+  if (!screw) return;
+  altAnimating = true;
+  alt.removedScrews.add(screwKey(board, screw));
+  moves++;
+
+  const remaining = activeScrews(board).length;
+  if (remaining === 0) {
+    alt.fallingBoards.add(board.id);
+    drawTexture();
+    await wait(170);
+    board.cleared = true;
+    alt.fallingBoards.delete(board.id);
+    score++;
+    toastEl.textContent = altMetric() === 0 ? '全ての板を外しました' : `板が落ちました。残り ${altMetric()} 枚`;
+  } else {
+    toastEl.textContent = `ネジを外しました。この板は残り ${remaining} 本`;
+  }
+
+  altAnimating = false;
   updateStats();
   drawTexture();
 }
@@ -1560,6 +1722,15 @@ function handleAltClick(cell, event) {
     if (!piece) return;
     launchArrowPiece(piece);
   }
+  if (proto === 'screw') {
+    const board = visibleScrewAt(cell.q, cell.r);
+    if (!board) {
+      toastEl.textContent = 'ここには外せるネジが見えていません';
+      drawTexture();
+      return;
+    }
+    removeScrew(board, cell.q, cell.r);
+  }
   if (proto === 'sweeper') {
     if (event.shiftKey) {
       if (alt.flags.has(id)) alt.flags.delete(id);
@@ -1586,6 +1757,10 @@ function altHint() {
   if (proto === 'arrow') {
     const movable = (alt.arrowPieces ?? []).filter(piece => !piece.cleared && arrowEscapePlan(piece).length > 0).length;
     toastEl.textContent = `今動かせる長い矢印: ${movable}`;
+  }
+  if (proto === 'screw') {
+    const visible = cells().filter(cell => visibleScrewAt(cell.q, cell.r)).length;
+    toastEl.textContent = `今外せるネジ: ${visible}`;
   }
   if (proto === 'sweeper') toastEl.textContent = 'Shiftクリックで旗、通常クリックで開きます';
   drawTexture();
