@@ -177,6 +177,7 @@ let moves = 0;
 let rule = 'line';
 let colorCount = 7;
 let clearing = false;
+let altAnimating = false;
 let showGrid = true;
 let showBumps = true;
 let proto = 'match';
@@ -1024,8 +1025,9 @@ function resetAlt(countMove = false) {
     alt.visited = new Set();
   }
   if (proto === 'arrow') {
-    alt.arrows = new Map(cells().map(c => [c.id, Math.floor(Math.random() * 6)]));
-    alt.present = new Set(cells().map(c => c.id));
+    alt.arrowPieces = createArrowPieces();
+    alt.arrowMotion = null;
+    rebuildArrowOccupancy();
   }
   if (proto === 'sweeper') {
     const mineCount = 12;
@@ -1050,7 +1052,7 @@ function updateProtoCard() {
     pipe: ['Pipe Connect', 'ヘックス上の管を回転させ、左端から右端まで流れをつなぎます。'],
     paint: ['Paint', '隣接セルが同色にならないように塗り分けます。'],
     path: ['One Stroke', '隣接セルを一筆書きで辿り、できるだけ全セルを訪れます。'],
-    arrow: ['Arrow Clear', '矢印方向に障害物がなければ盤外へ抜けて消えます。順番が大事です。'],
+    arrow: ['Arrow Clear', '長い矢印ピースを外へ逃がします。途中で別ピースに当たると抜けられません。'],
     sweeper: ['Sweeper', '6近傍の地雷数を読むヘックス版マインスイーパーです。Shiftクリックで旗。'],
   }[proto];
   protoCardEl.innerHTML = `<strong>${text[0]}</strong><span>${text[1]}</span>`;
@@ -1061,7 +1063,7 @@ function altMetric() {
   if (proto === 'pipe') return alt.connected?.size ?? 0;
   if (proto === 'paint') return paintConflicts().size;
   if (proto === 'path') return `${alt.path?.length ?? 0}/${rows * cols}`;
-  if (proto === 'arrow') return alt.present?.size ?? 0;
+  if (proto === 'arrow') return alt.arrowPieces?.filter(piece => !piece.cleared).length ?? 0;
   if (proto === 'sweeper') return alt.revealed?.size ?? 0;
   return 0;
 }
@@ -1258,61 +1260,172 @@ function drawPath() {
   tx.restore();
 }
 
-function drawArrow() {
-  for (const c of cells()) {
-    const p = axialToPixel(c.q, c.r);
-    if (!alt.present.has(c.id)) {
-      drawEmptyHex(c.q, c.r, p.x, p.y);
-      continue;
+function createArrowPieces() {
+  return [
+    { id: 'a', value: 0, dir: 0, cells: axialCells([[0, 0], [1, 0], [2, 0]]) },
+    { id: 'b', value: 1, dir: 3, cells: axialCells([[8, 0], [7, 0], [6, 0]]) },
+    { id: 'c', value: 2, dir: 5, cells: axialCells([[0, 1], [0, 2], [0, 3]]) },
+    { id: 'd', value: 3, dir: 2, cells: axialCells([[8, 7], [8, 6], [8, 5]]) },
+    { id: 'e', value: 4, dir: 0, cells: axialCells([[2, 2], [3, 2], [3, 3], [4, 3]]) },
+    { id: 'f', value: 5, dir: 3, cells: axialCells([[6, 4], [5, 4], [5, 5], [4, 5]]) },
+    { id: 'g', value: 6, dir: 1, cells: axialCells([[1, 7], [2, 6], [3, 5]]) },
+    { id: 'h', value: 7, dir: 4, cells: axialCells([[7, 1], [6, 2], [5, 3]]) },
+    { id: 'i', value: 8, dir: 5, cells: axialCells([[1, 4], [2, 4], [2, 5]]) },
+    { id: 'j', value: 0, dir: 2, cells: axialCells([[7, 6], [6, 6], [6, 5]]) },
+  ];
+}
+
+function axialCells(list) {
+  return list.map(([q, r]) => ({ q, r }));
+}
+
+function rebuildArrowOccupancy() {
+  alt.arrowOccupancy = new Map();
+  for (const piece of alt.arrowPieces ?? []) {
+    if (piece.cleared) continue;
+    for (const cell of piece.cells) {
+      if (inBounds(cell.q, cell.r)) alt.arrowOccupancy.set(keyOf(cell.q, cell.r), piece.id);
     }
-    const dir = alt.arrows.get(c.id);
-    const blocked = arrowBlocked(c.q, c.r);
-    drawHexVisual(c.q, c.r, p.x, p.y, dir % colorCount, {
-      hover: hover?.q === c.q && hover?.r === c.r,
-      preview: !blocked,
-      match: blocked && hover?.q === c.q && hover?.r === c.r,
-      scale: 1,
-      alpha: 1,
-    });
-    drawArrowGlyph(p.x, p.y, dir, blocked);
   }
 }
 
-function drawArrowGlyph(x, y, dir, blocked) {
+function arrowPieceAt(q, r) {
+  const pieceId = alt.arrowOccupancy?.get(keyOf(q, r));
+  return alt.arrowPieces?.find(piece => piece.id === pieceId && !piece.cleared) ?? null;
+}
+
+function nextArrowCells(cellsToMove, dir) {
+  const delta = dirs[dir];
+  return cellsToMove.map(cell => ({ q: cell.q + delta.q, r: cell.r + delta.r }));
+}
+
+function arrowStepBlocked(piece, fromCells = piece.cells) {
+  const next = nextArrowCells(fromCells, piece.dir);
+  for (const cell of next) {
+    if (!inBounds(cell.q, cell.r)) continue;
+    const occupant = alt.arrowOccupancy.get(keyOf(cell.q, cell.r));
+    if (occupant && occupant !== piece.id) return true;
+  }
+  return false;
+}
+
+function arrowEscapePlan(piece) {
+  const plan = [];
+  let movingCells = piece.cells.map(cell => ({ ...cell }));
+  while (movingCells.length > 0 && plan.length < cols + rows) {
+    if (arrowStepBlocked(piece, movingCells)) break;
+    const next = nextArrowCells(movingCells, piece.dir);
+    plan.push(next);
+    movingCells = next.filter(cell => inBounds(cell.q, cell.r));
+  }
+  return plan;
+}
+
+function drawArrow() {
+  const movingId = alt.arrowMotion?.piece.id;
+  for (const c of cells()) {
+    const p = axialToPixel(c.q, c.r);
+    drawEmptyHex(c.q, c.r, p.x, p.y);
+  }
+  for (const piece of alt.arrowPieces ?? []) {
+    if (piece.cleared || piece.id === movingId) continue;
+    drawArrowPiece(piece, piece.cells);
+  }
+  if (alt.arrowMotion) drawArrowPiece(
+    alt.arrowMotion.piece,
+    interpolateArrowCells(alt.arrowMotion.from, alt.arrowMotion.to, alt.arrowMotion.progress),
+    1 - alt.arrowMotion.exitFade * alt.arrowMotion.progress,
+  );
+}
+
+function interpolateArrowCells(fromCells, toCells, progress) {
+  return fromCells.map((from, index) => {
+    const to = toCells[index];
+    return {
+      q: from.q + (to.q - from.q) * progress,
+      r: from.r + (to.r - from.r) * progress,
+    };
+  });
+}
+
+function drawArrowPiece(piece, drawCells, alpha = 1) {
+  const color = pieces[piece.value % colorCount];
+  const actualCells = piece.cells.filter(cell => inBounds(cell.q, cell.r));
+  const hoverPiece = hover && actualCells.some(cell => cell.q === hover.q && cell.r === hover.r);
+  const canMove = arrowEscapePlan(piece).length > 0;
+
+  tx.save();
+  tx.globalAlpha = alpha;
+  tx.lineCap = 'round';
+  tx.lineJoin = 'round';
+
+  for (const cell of drawCells) {
+    const p = axialToPixel(cell.q, cell.r);
+    drawArrowCellFill(p.x, p.y, color, hoverPiece, canMove);
+  }
+
+  tx.beginPath();
+  drawCells.forEach((cell, index) => {
+    const p = axialToPixel(cell.q, cell.r);
+    if (index === 0) tx.moveTo(p.x, p.y);
+    else tx.lineTo(p.x, p.y);
+  });
+  tx.strokeStyle = 'rgba(17,20,20,0.72)';
+  tx.lineWidth = 25;
+  tx.stroke();
+  tx.strokeStyle = color.color;
+  tx.lineWidth = 17;
+  tx.stroke();
+  tx.strokeStyle = canMove ? '#fffdf4' : 'rgba(17,20,20,0.42)';
+  tx.lineWidth = 5;
+  tx.stroke();
+
+  const headCell = drawCells[drawCells.length - 1];
+  const head = axialToPixel(headCell.q, headCell.r);
+  drawArrowHead(head.x, head.y, piece.dir, color, canMove);
+  tx.restore();
+}
+
+function drawArrowCellFill(x, y, piece, hoverPiece, canMove) {
+  tx.save();
+  tx.translate(x, y);
+  tx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const angle = Math.PI / 180 * (60 * i - 30);
+    const px = Math.cos(angle) * radius * 0.92;
+    const py = Math.sin(angle) * radius * 0.92;
+    if (i === 0) tx.moveTo(px, py);
+    else tx.lineTo(px, py);
+  }
+  tx.closePath();
+  tx.fillStyle = piece.color;
+  tx.globalAlpha *= canMove ? 0.72 : 0.5;
+  tx.fill();
+  tx.globalAlpha = 1;
+  tx.lineWidth = hoverPiece ? 6 : 2.5;
+  tx.strokeStyle = hoverPiece ? '#f3b24e' : 'rgba(17,20,20,0.38)';
+  tx.stroke();
+  tx.restore();
+}
+
+function drawArrowHead(x, y, dir, piece, canMove) {
   const angle = Math.PI / 180 * (60 * dir);
   tx.save();
   tx.translate(x, y);
   tx.rotate(angle);
   tx.lineCap = 'round';
   tx.lineJoin = 'round';
-  tx.strokeStyle = blocked ? '#2d3437' : '#ffffff';
-  tx.fillStyle = blocked ? '#2d3437' : '#ffffff';
-  tx.lineWidth = 7;
+  tx.fillStyle = canMove ? '#fffdf4' : piece.ink;
+  tx.strokeStyle = 'rgba(17,20,20,0.72)';
+  tx.lineWidth = 4;
   tx.beginPath();
-  tx.moveTo(-15, 0);
-  tx.lineTo(15, 0);
-  tx.stroke();
-  tx.beginPath();
-  tx.moveTo(21, 0);
-  tx.lineTo(7, -10);
-  tx.lineTo(7, 10);
+  tx.moveTo(28, 0);
+  tx.lineTo(2, -18);
+  tx.lineTo(2, 18);
   tx.closePath();
   tx.fill();
+  tx.stroke();
   tx.restore();
-}
-
-function arrowBlocked(q, r) {
-  const id = keyOf(q, r);
-  if (!alt.present.has(id)) return true;
-  const dir = alt.arrows.get(id);
-  let nq = q + dirs[dir].q;
-  let nr = r + dirs[dir].r;
-  while (inBounds(nq, nr)) {
-    if (alt.present.has(keyOf(nq, nr))) return true;
-    nq += dirs[dir].q;
-    nr += dirs[dir].r;
-  }
-  return false;
 }
 
 function drawSweeper() {
@@ -1334,8 +1447,62 @@ function mineCount(q, r) {
   return neighbors(q, r).filter(n => alt.mines.has(keyOf(n.q, n.r))).length;
 }
 
+async function launchArrowPiece(piece) {
+  const plan = arrowEscapePlan(piece);
+  if (plan.length === 0) {
+    toastEl.textContent = 'この長い矢印は途中で詰まっています';
+    drawTexture();
+    return;
+  }
+
+  altAnimating = true;
+  moves++;
+  let from = piece.cells.map(cell => ({ ...cell }));
+  for (const to of plan) {
+    await animateArrowStep(piece, from, to, 110);
+    piece.cells = to.filter(cell => inBounds(cell.q, cell.r));
+    rebuildArrowOccupancy();
+    from = piece.cells.map(cell => ({ ...cell }));
+    if (piece.cells.length === 0) break;
+  }
+
+  if (piece.cells.length === 0) {
+    piece.cleared = true;
+    score++;
+  }
+  alt.arrowMotion = null;
+  altAnimating = false;
+  rebuildArrowOccupancy();
+  const remaining = altMetric();
+  toastEl.textContent = remaining === 0 ? '全ての長い矢印が抜けました' : `滑走。残り ${remaining} ピース`;
+  updateStats();
+  drawTexture();
+}
+
+function animateArrowStep(piece, from, to, duration) {
+  if (animationRequest) cancelAnimationFrame(animationRequest);
+  const start = performance.now();
+  const exitFade = to.some(cell => !inBounds(cell.q, cell.r)) ? 0.32 : 0;
+  return new Promise(resolve => {
+    function frame(now) {
+      const raw = Math.min(1, (now - start) / duration);
+      const progress = 1 - Math.pow(1 - raw, 3);
+      alt.arrowMotion = { piece, from, to, progress, exitFade };
+      drawTexture();
+      if (raw < 1) {
+        animationRequest = requestAnimationFrame(frame);
+      } else {
+        animationRequest = null;
+        resolve();
+      }
+    }
+    animationRequest = requestAnimationFrame(frame);
+  });
+}
+
 function handleAltClick(cell, event) {
   const id = keyOf(cell.q, cell.r);
+  if (altAnimating) return;
   if (proto === 'lineclear') {
     if (alt.filled.get(id) === null) {
       alt.filled.set(id, alt.next);
@@ -1389,14 +1556,9 @@ function handleAltClick(cell, event) {
     toastEl.textContent = `Path ${alt.path.length}/${rows * cols}`;
   }
   if (proto === 'arrow') {
-    if (arrowBlocked(cell.q, cell.r)) {
-      toastEl.textContent = '矢印方向が詰まっています';
-    } else {
-      alt.present.delete(id);
-      moves++;
-      score++;
-      toastEl.textContent = alt.present.size === 0 ? '全消し成功' : `脱出。残り ${alt.present.size}`;
-    }
+    const piece = arrowPieceAt(cell.q, cell.r);
+    if (!piece) return;
+    launchArrowPiece(piece);
   }
   if (proto === 'sweeper') {
     if (event.shiftKey) {
@@ -1422,11 +1584,8 @@ function altHint() {
   if (proto === 'paint') toastEl.textContent = `隣接同色の衝突: ${paintConflicts().size}`;
   if (proto === 'path') toastEl.textContent = '隣接する未訪問セルを順にクリックします';
   if (proto === 'arrow') {
-    const open = [...alt.present].filter(id => {
-      const [q, r] = parseKey(id);
-      return !arrowBlocked(q, r);
-    }).length;
-    toastEl.textContent = `今抜けられる矢印: ${open}`;
+    const movable = (alt.arrowPieces ?? []).filter(piece => !piece.cleared && arrowEscapePlan(piece).length > 0).length;
+    toastEl.textContent = `今動かせる長い矢印: ${movable}`;
   }
   if (proto === 'sweeper') toastEl.textContent = 'Shiftクリックで旗、通常クリックで開きます';
   drawTexture();
