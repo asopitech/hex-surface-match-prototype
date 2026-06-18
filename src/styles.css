@@ -166,6 +166,17 @@ h2 {
   gap: 8px;
 }
 
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.mode-grid button {
+  min-height: 38px;
+  padding: 8px 6px;
+}
+
 .rule-card {
   min-height: 78px;
   padding: 12px;
