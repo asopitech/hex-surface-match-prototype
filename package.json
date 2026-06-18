@@ -1,0 +1,19 @@
+{
+  "name": "d-d-d",
+  "version": "1.0.0",
+  "description": "3D animal surface puzzle prototype",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "three": "^0.184.0",
+    "vite": "^8.0.16"
+  }
+}
