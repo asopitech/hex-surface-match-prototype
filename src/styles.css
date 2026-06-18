@@ -89,6 +89,49 @@ button.primary {
   text-align: right;
 }
 
+.mode-hud {
+  position: absolute;
+  left: 20px;
+  bottom: 20px;
+  min-width: 168px;
+  padding: 10px 12px;
+  border: 1px solid rgba(17, 20, 20, 0.18);
+  border-radius: 6px;
+  color: #161817;
+  background: rgba(255, 253, 244, 0.82);
+  box-shadow: 0 10px 24px rgba(17, 20, 20, 0.12);
+  pointer-events: none;
+}
+
+.mode-hud:empty {
+  display: none;
+}
+
+.mode-hud span {
+  display: block;
+  margin-bottom: 4px;
+  color: #5a5145;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mode-hud strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+}
+
+.mode-hud i {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(17, 20, 20, 0.48);
+  border-radius: 50%;
+}
+
 .panel {
   min-height: 100vh;
   padding: 22px;

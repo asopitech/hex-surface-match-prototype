@@ -15,6 +15,7 @@ app.innerHTML = `
         </div>
         <div id="toast">鞍の曲面に貼られたヘックスをクリック</div>
       </div>
+      <div class="mode-hud" id="mode-hud"></div>
     </section>
     <aside class="panel">
       <header>
@@ -96,6 +97,7 @@ const scoreEl = document.querySelector('#score');
 const movesEl = document.querySelector('#moves');
 const matchEl = document.querySelector('#match');
 const toastEl = document.querySelector('#toast');
+const modeHudEl = document.querySelector('#mode-hud');
 const legendEl = document.querySelector('#legend');
 const protoCardEl = document.querySelector('#proto-card');
 const ruleCardEl = document.querySelector('#rule-card');
@@ -1033,7 +1035,7 @@ function resetAlt(countMove = false) {
   if (proto === 'screw') {
     alt.screwBoards = createScrewBoards();
     alt.removedScrews = new Set();
-    alt.fallingBoards = new Set();
+    alt.screwMotion = new Map();
   }
   if (proto === 'sweeper') {
     const mineCount = 12;
@@ -1125,10 +1127,6 @@ function drawLineClear() {
     if (value === null) drawEmptyHex(c.q, c.r, p.x, p.y);
     else drawHexVisual(c.q, c.r, p.x, p.y, value, { preview: lines.has(c.id), scale: 1, alpha: 1 });
   }
-  const np = pieces[alt.next];
-  tx.fillStyle = '#141817';
-  tx.font = '800 24px ui-sans-serif, system-ui';
-  tx.fillText(`Next: ${np.name}`, 86, 76);
 }
 
 function lineSets() {
@@ -1496,24 +1494,36 @@ function drawScrew() {
 
   const boards = [...(alt.screwBoards ?? [])].sort((a, b) => a.layer - b.layer);
   for (const board of boards) {
-    if (board.cleared && !alt.fallingBoards?.has(board.id)) continue;
-    drawScrewBoard(board, alt.fallingBoards?.has(board.id));
+    const motion = alt.screwMotion?.get(board.id);
+    if (board.cleared && !motion) continue;
+    drawScrewBoard(board, motion);
   }
   drawVisibleScrews();
 }
 
-function drawScrewBoard(board, falling = false) {
+function drawScrewBoard(board, motion = null) {
   const piece = pieces[board.value % colorCount];
-  const fallOffset = falling ? 18 : 0;
-  const points = board.cells.map(cell => axialToPixel(cell.q, cell.r + fallOffset / 80));
+  const fall = motion ? motion.progress * motion.progress : 0;
+  const drift = motion ? Math.sin(motion.progress * Math.PI) * motion.drift : 0;
+  const drop = fall * 470;
+  const rotation = motion ? motion.spin * motion.progress : 0;
+  const points = board.cells.map(cell => axialToPixel(cell.q, cell.r));
+  const center = points.reduce((sum, point) => ({
+    x: sum.x + point.x / points.length,
+    y: sum.y + point.y / points.length,
+  }), { x: 0, y: 0 });
   tx.save();
-  tx.globalAlpha = falling ? 0.28 : 0.9;
+  tx.translate(center.x + drift, center.y + drop);
+  tx.rotate(rotation);
+  tx.globalAlpha = motion ? Math.max(0, 0.9 - motion.progress * 0.58) : 0.9;
   tx.lineCap = 'round';
   tx.lineJoin = 'round';
   tx.beginPath();
   points.forEach((point, index) => {
-    if (index === 0) tx.moveTo(point.x, point.y);
-    else tx.lineTo(point.x, point.y);
+    const x = point.x - center.x;
+    const y = point.y - center.y;
+    if (index === 0) tx.moveTo(x, y);
+    else tx.lineTo(x, y);
   });
   tx.strokeStyle = 'rgba(17,20,20,0.62)';
   tx.lineWidth = 54;
@@ -1625,11 +1635,9 @@ async function removeScrew(board, q, r) {
 
   const remaining = activeScrews(board).length;
   if (remaining === 0) {
-    alt.fallingBoards.add(board.id);
-    drawTexture();
-    await wait(170);
+    await animateScrewFall(board);
     board.cleared = true;
-    alt.fallingBoards.delete(board.id);
+    alt.screwMotion.delete(board.id);
     score++;
     toastEl.textContent = altMetric() === 0 ? '全ての板を外しました' : `板が落ちました。残り ${altMetric()} 枚`;
   } else {
@@ -1639,6 +1647,27 @@ async function removeScrew(board, q, r) {
   altAnimating = false;
   updateStats();
   drawTexture();
+}
+
+function animateScrewFall(board) {
+  if (animationRequest) cancelAnimationFrame(animationRequest);
+  const start = performance.now();
+  const drift = board.id.charCodeAt(board.id.length - 1) % 2 === 0 ? -42 : 42;
+  const spin = (board.layer % 2 === 0 ? 1 : -1) * 0.18;
+  return new Promise(resolve => {
+    function frame(now) {
+      const progress = Math.min(1, (now - start) / 560);
+      alt.screwMotion.set(board.id, { progress, drift, spin });
+      drawTexture();
+      if (progress < 1) {
+        animationRequest = requestAnimationFrame(frame);
+      } else {
+        animationRequest = null;
+        resolve();
+      }
+    }
+    animationRequest = requestAnimationFrame(frame);
+  });
 }
 
 function animateArrowStep(piece, from, to, duration) {
@@ -1771,11 +1800,31 @@ function updateStats() {
     scoreEl.textContent = score;
     movesEl.textContent = moves;
     matchEl.textContent = altMetric();
+    updateModeHud();
     return;
   }
   scoreEl.textContent = score;
   movesEl.textContent = moves;
   matchEl.textContent = findMatches().size || findAnyMove()?.matched?.size || 0;
+  updateModeHud();
+}
+
+function updateModeHud() {
+  if (proto === 'lineclear' && alt.next !== undefined) {
+    const next = pieces[alt.next];
+    modeHudEl.innerHTML = `<span>Next</span><strong><i style="background:${next.color}"></i>${next.name}</strong>`;
+    return;
+  }
+  if (proto === 'screw' && alt.screwBoards) {
+    const visible = cells().filter(cell => visibleScrewAt(cell.q, cell.r)).length;
+    modeHudEl.innerHTML = `<span>Visible Screws</span><strong>${visible}</strong>`;
+    return;
+  }
+  if (proto === 'sweeper' && alt.flags) {
+    modeHudEl.innerHTML = `<span>Flags</span><strong>${alt.flags.size}</strong>`;
+    return;
+  }
+  modeHudEl.innerHTML = '';
 }
 
 function updateRuleCard() {
