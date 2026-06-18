@@ -34,6 +34,7 @@ app.innerHTML = `
           <button class="proto" data-proto="pipe">Pipe</button>
           <button class="proto" data-proto="paint">Paint</button>
           <button class="proto" data-proto="path">Path</button>
+          <button class="proto" data-proto="arrow">Arrow</button>
           <button class="proto" data-proto="sweeper">Sweeper</button>
         </div>
         <div class="rule-card" id="proto-card"></div>
@@ -1022,6 +1023,10 @@ function resetAlt(countMove = false) {
     alt.path = [];
     alt.visited = new Set();
   }
+  if (proto === 'arrow') {
+    alt.arrows = new Map(cells().map(c => [c.id, Math.floor(Math.random() * 6)]));
+    alt.present = new Set(cells().map(c => c.id));
+  }
   if (proto === 'sweeper') {
     const mineCount = 12;
     const all = cells().map(c => c.id);
@@ -1045,6 +1050,7 @@ function updateProtoCard() {
     pipe: ['Pipe Connect', 'ヘックス上の管を回転させ、左端から右端まで流れをつなぎます。'],
     paint: ['Paint', '隣接セルが同色にならないように塗り分けます。'],
     path: ['One Stroke', '隣接セルを一筆書きで辿り、できるだけ全セルを訪れます。'],
+    arrow: ['Arrow Clear', '矢印方向に障害物がなければ盤外へ抜けて消えます。順番が大事です。'],
     sweeper: ['Sweeper', '6近傍の地雷数を読むヘックス版マインスイーパーです。Shiftクリックで旗。'],
   }[proto];
   protoCardEl.innerHTML = `<strong>${text[0]}</strong><span>${text[1]}</span>`;
@@ -1055,6 +1061,7 @@ function altMetric() {
   if (proto === 'pipe') return alt.connected?.size ?? 0;
   if (proto === 'paint') return paintConflicts().size;
   if (proto === 'path') return `${alt.path?.length ?? 0}/${rows * cols}`;
+  if (proto === 'arrow') return alt.present?.size ?? 0;
   if (proto === 'sweeper') return alt.revealed?.size ?? 0;
   return 0;
 }
@@ -1067,6 +1074,7 @@ function drawAltTexture() {
   if (proto === 'pipe') drawPipe();
   if (proto === 'paint') drawPaint();
   if (proto === 'path') drawPath();
+  if (proto === 'arrow') drawArrow();
   if (proto === 'sweeper') drawSweeper();
   boardTexture.needsUpdate = true;
 }
@@ -1250,6 +1258,63 @@ function drawPath() {
   tx.restore();
 }
 
+function drawArrow() {
+  for (const c of cells()) {
+    const p = axialToPixel(c.q, c.r);
+    if (!alt.present.has(c.id)) {
+      drawEmptyHex(c.q, c.r, p.x, p.y);
+      continue;
+    }
+    const dir = alt.arrows.get(c.id);
+    const blocked = arrowBlocked(c.q, c.r);
+    drawHexVisual(c.q, c.r, p.x, p.y, dir % colorCount, {
+      hover: hover?.q === c.q && hover?.r === c.r,
+      preview: !blocked,
+      match: blocked && hover?.q === c.q && hover?.r === c.r,
+      scale: 1,
+      alpha: 1,
+    });
+    drawArrowGlyph(p.x, p.y, dir, blocked);
+  }
+}
+
+function drawArrowGlyph(x, y, dir, blocked) {
+  const angle = Math.PI / 180 * (60 * dir);
+  tx.save();
+  tx.translate(x, y);
+  tx.rotate(angle);
+  tx.lineCap = 'round';
+  tx.lineJoin = 'round';
+  tx.strokeStyle = blocked ? '#2d3437' : '#ffffff';
+  tx.fillStyle = blocked ? '#2d3437' : '#ffffff';
+  tx.lineWidth = 7;
+  tx.beginPath();
+  tx.moveTo(-15, 0);
+  tx.lineTo(15, 0);
+  tx.stroke();
+  tx.beginPath();
+  tx.moveTo(21, 0);
+  tx.lineTo(7, -10);
+  tx.lineTo(7, 10);
+  tx.closePath();
+  tx.fill();
+  tx.restore();
+}
+
+function arrowBlocked(q, r) {
+  const id = keyOf(q, r);
+  if (!alt.present.has(id)) return true;
+  const dir = alt.arrows.get(id);
+  let nq = q + dirs[dir].q;
+  let nr = r + dirs[dir].r;
+  while (inBounds(nq, nr)) {
+    if (alt.present.has(keyOf(nq, nr))) return true;
+    nq += dirs[dir].q;
+    nr += dirs[dir].r;
+  }
+  return false;
+}
+
 function drawSweeper() {
   const allRevealed = alt.dead;
   for (const c of cells()) {
@@ -1323,6 +1388,16 @@ function handleAltClick(cell, event) {
     score = alt.path.length;
     toastEl.textContent = `Path ${alt.path.length}/${rows * cols}`;
   }
+  if (proto === 'arrow') {
+    if (arrowBlocked(cell.q, cell.r)) {
+      toastEl.textContent = '矢印方向が詰まっています';
+    } else {
+      alt.present.delete(id);
+      moves++;
+      score++;
+      toastEl.textContent = alt.present.size === 0 ? '全消し成功' : `脱出。残り ${alt.present.size}`;
+    }
+  }
   if (proto === 'sweeper') {
     if (event.shiftKey) {
       if (alt.flags.has(id)) alt.flags.delete(id);
@@ -1346,6 +1421,13 @@ function altHint() {
   if (proto === 'pipe') toastEl.textContent = pipeSolved() ? '接続済みです' : `接続中セル: ${alt.connected.size}`;
   if (proto === 'paint') toastEl.textContent = `隣接同色の衝突: ${paintConflicts().size}`;
   if (proto === 'path') toastEl.textContent = '隣接する未訪問セルを順にクリックします';
+  if (proto === 'arrow') {
+    const open = [...alt.present].filter(id => {
+      const [q, r] = parseKey(id);
+      return !arrowBlocked(q, r);
+    }).length;
+    toastEl.textContent = `今抜けられる矢印: ${open}`;
+  }
   if (proto === 'sweeper') toastEl.textContent = 'Shiftクリックで旗、通常クリックで開きます';
   drawTexture();
 }
